@@ -1,11 +1,11 @@
 bin/
 **/bin/
 !Modules/**
-obj
-csx
-.vs
-edge
-Publish
+obj/
+csx/
+.vs/
+edge/
+Publish/
 
 *.user
 *.suo
@@ -13,53 +13,86 @@ Publish
 *.Cache
 project.lock.json
 
-/packages
-/TestResults
-
+/packages/
+/TestResults/
 /tools/NuGet.exe
-/App_Data
-/secrets
-data/
+/App_Data/
+/secrets/
 .secrets
 appsettings.json
 local.settings.json
+local_settings.py
 
-node_modules
-dist
+data/
 
-# Local python packages
+node_modules/
+dist/
+
 .python_packages/
 
-# Python Environments
 .env
-.venv
+.envrc
+.venv/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
 
-# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*.py[codz]
 *$py.class
+*.so
 
-# Azurite artifacts
-__blobstorage__
-__queuestorage__
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py.cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+.pdm-python
+.pdm-build/
+.pixi/
+__pypackages__/
+
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pytype/
+cython_debug/
+
+__blobstorage__/
+__queuestorage__/
 __azurite_db*__.json
 
-# BirdSpotter local cache
-data/*.json
-
-# macOS
 .DS_Store
-
-# VS Code workspace settings
 .vscode/
-
-# Ruff cache
 .ruff_cache/
-
-# pytest
-.pytest_cache/
+tempCodeRunnerFile.py
+.pypirc
