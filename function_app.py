@@ -1,4 +1,5 @@
 import json
+import logging
 
 import azure.functions as func
 import requests
@@ -12,8 +13,16 @@ from services.sync_engine import (
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
 
-@app.route(route="sync-today-local", methods=["GET"])
-def sync_today_local(req: func.HttpRequest) -> func.HttpResponse:
+def json_response(payload: dict, status_code: int = 200) -> func.HttpResponse:
+    return func.HttpResponse(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        status_code=status_code,
+        mimetype="application/json",
+    )
+
+
+@app.route(route="sync-today", methods=["GET"])
+def sync_today(req: func.HttpRequest) -> func.HttpResponse:
     try:
         result = run_today_sync()
     except RuntimeError as exc:
@@ -25,11 +34,31 @@ def sync_today_local(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json",
         )
 
-    return func.HttpResponse(
-        json.dumps(result, ensure_ascii=False, indent=2),
-        status_code=200,
-        mimetype="application/json",
-    )
+    return json_response(result)
+
+
+@app.timer_trigger(
+    schedule="0 */5 * * * *",
+    arg_name="timer",
+    run_on_startup=False,
+    use_monitor=True,
+)
+def sync_today_timer(timer: func.TimerRequest) -> None:
+    if timer.past_due:
+        logging.warning("sync_today_timer is past due.")
+
+    try:
+        result = run_today_sync()
+        logging.info(
+            "sync_today_timer completed. mode=%s storage=%s recordsFetched=%s recordsWritten=%s",
+            result.get("mode"),
+            result.get("storage"),
+            result.get("recordsFetched"),
+            result.get("recordsWritten"),
+        )
+    except Exception:
+        logging.exception("sync_today_timer failed.")
+        raise
 
 
 @app.route(route="observations/today", methods=["GET"])
@@ -37,17 +66,12 @@ def get_today_observations(req: func.HttpRequest) -> func.HttpResponse:
     content = read_today_json()
 
     if content is None:
-        return func.HttpResponse(
-            json.dumps(
-                {
-                    "success": False,
-                    "error": "today.json does not exist. Run /api/sync-today-local first.",
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
+        return json_response(
+            {
+                "success": False,
+                "error": "today.json does not exist. Run /api/sync-today first.",
+            },
             status_code=404,
-            mimetype="application/json",
         )
 
     return func.HttpResponse(
@@ -62,17 +86,12 @@ def get_syncstate(req: func.HttpRequest) -> func.HttpResponse:
     content = read_syncstate_json()
 
     if content is None:
-        return func.HttpResponse(
-            json.dumps(
-                {
-                    "success": False,
-                    "error": "syncstate.json does not exist. Run /api/sync-today-local first.",
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
+        return json_response(
+            {
+                "success": False,
+                "error": "syncstate.json does not exist. Run /api/sync-today first.",
+            },
             status_code=404,
-            mimetype="application/json",
         )
 
     return func.HttpResponse(

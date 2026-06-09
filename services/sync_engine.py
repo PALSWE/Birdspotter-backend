@@ -1,18 +1,36 @@
 import datetime
-import json
 import os
 from pathlib import Path
 from typing import Optional
 
 from services.sos_client import build_search_body, call_sos_search_by_cursor
+from storage.blob_storage import BlobStorage
+from storage.file_storage import FileStorage
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
-TODAY_FILE = DATA_DIR / "today.json"
-SYNCSTATE_FILE = DATA_DIR / "syncstate.json"
+
+TODAY_FILENAME = "today.json"
+SYNCSTATE_FILENAME = "syncstate.json"
 
 MAX_PAGES = int(os.environ["MAX_PAGES"])
 OVERLAP_SECONDS = 2
+
+
+def create_storage():
+    connection_string = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+
+    if connection_string:
+        return BlobStorage(
+            connection_string=connection_string,
+            observations_container_name=os.environ["OBSERVATIONS_CONTAINER_NAME"],
+            metadata_container_name=os.environ["METADATA_CONTAINER_NAME"],
+        )
+
+    return FileStorage(DATA_DIR)
+
+
+storage = create_storage()
 
 
 def utc_now_iso() -> str:
@@ -42,27 +60,6 @@ def apply_overlap(value: str) -> str:
         return value
 
     return (parsed - datetime.timedelta(seconds=OVERLAP_SECONDS)).isoformat()
-
-
-def load_json_file(path: Path) -> Optional[dict]:
-    if not path.exists():
-        return None
-
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def write_json_file(path: Path, payload: dict, *, pretty: bool = True) -> None:
-    DATA_DIR.mkdir(exist_ok=True)
-
-    path.write_text(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            indent=2 if pretty else None,
-            separators=None if pretty else (",", ":"),
-        ),
-        encoding="utf-8",
-    )
 
 
 def normalize_record(record: dict) -> dict:
@@ -161,8 +158,8 @@ def run_today_sync() -> dict:
     start_date, end_date = today_range_local()
     started_at = utc_now_iso()
 
-    existing_today = load_json_file(TODAY_FILE)
-    existing_syncstate = load_json_file(SYNCSTATE_FILE)
+    existing_today = storage.read_json(TODAY_FILENAME)
+    existing_syncstate = storage.read_json(SYNCSTATE_FILENAME)
 
     full_refresh = should_do_full_refresh(
         existing_today,
@@ -271,16 +268,20 @@ def run_today_sync() -> dict:
         "completedFullCursorScan": not cursor,
         "maxPages": max_pages,
         "take": take,
+        "storage": "blob"
+        if os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+        else "file",
     }
 
-    write_json_file(TODAY_FILE, output, pretty=False)
-    write_json_file(SYNCSTATE_FILE, syncstate, pretty=True)
+    storage.write_json(TODAY_FILENAME, output, pretty=False)
+    storage.write_json(SYNCSTATE_FILENAME, syncstate, pretty=True)
 
     return {
         "success": True,
         "mode": "full" if full_refresh else "delta",
-        "todayFile": str(TODAY_FILE),
-        "syncstateFile": str(SYNCSTATE_FILE),
+        "storage": syncstate["storage"],
+        "todayFile": TODAY_FILENAME,
+        "syncstateFile": SYNCSTATE_FILENAME,
         "pagesFetched": pages_fetched,
         "recordsFetched": len(fetched_records),
         "recordsAdded": added_count,
@@ -294,14 +295,8 @@ def run_today_sync() -> dict:
 
 
 def read_today_json() -> Optional[str]:
-    if not TODAY_FILE.exists():
-        return None
-
-    return TODAY_FILE.read_text(encoding="utf-8")
+    return storage.read_text(TODAY_FILENAME)
 
 
 def read_syncstate_json() -> Optional[str]:
-    if not SYNCSTATE_FILE.exists():
-        return None
-
-    return SYNCSTATE_FILE.read_text(encoding="utf-8")
+    return storage.read_text(SYNCSTATE_FILENAME)
