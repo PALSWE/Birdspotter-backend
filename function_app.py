@@ -5,8 +5,10 @@ import azure.functions as func
 import requests
 
 from services.sync_engine import (
+    get_nearby_observations,
     read_syncstate_json,
     read_today_json,
+    read_yesterday_json,
     run_today_sync,
 )
 
@@ -17,6 +19,26 @@ def json_response(payload: dict, status_code: int = 200) -> func.HttpResponse:
     return func.HttpResponse(
         json.dumps(payload, ensure_ascii=False, indent=2),
         status_code=status_code,
+        mimetype="application/json",
+    )
+
+
+@app.route(route="observations/yesterday", methods=["GET"])
+def get_yesterday_observations(req: func.HttpRequest) -> func.HttpResponse:
+    content = read_yesterday_json()
+
+    if content is None:
+        return json_response(
+            {
+                "success": False,
+                "error": "yesterday.json does not exist.",
+            },
+            status_code=404,
+        )
+
+    return func.HttpResponse(
+        content,
+        status_code=200,
         mimetype="application/json",
     )
 
@@ -79,6 +101,60 @@ def get_today_observations(req: func.HttpRequest) -> func.HttpResponse:
         status_code=200,
         mimetype="application/json",
     )
+
+
+@app.route(route="observations/nearby", methods=["GET"])
+def get_nearby(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        lat = float(req.params["lat"])
+        lon = float(req.params["lon"])
+        radius_km = float(req.params["radiusKm"])
+        max_results = (
+            int(req.params["maxResults"]) if req.params.get("maxResults") else None
+        )
+    except KeyError:
+        return json_response(
+            {
+                "success": False,
+                "error": "Required query parameters: lat, lon, radiusKm.",
+            },
+            status_code=400,
+        )
+    except ValueError:
+        return json_response(
+            {
+                "success": False,
+                "error": "lat, lon, radiusKm and maxResults must be numeric.",
+            },
+            status_code=400,
+        )
+
+    if radius_km <= 0:
+        return json_response(
+            {
+                "success": False,
+                "error": "radiusKm must be greater than zero.",
+            },
+            status_code=400,
+        )
+
+    result = get_nearby_observations(
+        lat=lat,
+        lon=lon,
+        radius_km=radius_km,
+        max_results=max_results,
+    )
+
+    if result is None:
+        return json_response(
+            {
+                "success": False,
+                "error": "today.json does not exist. Run /api/sync-today first.",
+            },
+            status_code=404,
+        )
+
+    return json_response(result)
 
 
 @app.route(route="syncstate", methods=["GET"])

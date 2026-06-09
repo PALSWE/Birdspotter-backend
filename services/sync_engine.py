@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from services.geo import distance_km
 from services.sos_client import build_search_body, call_sos_search_by_cursor
 from storage.blob_storage import BlobStorage
 from storage.file_storage import FileStorage
@@ -12,6 +13,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 
 TODAY_FILENAME = "today.json"
 SYNCSTATE_FILENAME = "syncstate.json"
+YESTERDAY_FILENAME = "yesterday.json"
 
 MAX_PAGES = int(os.environ["MAX_PAGES"])
 OVERLAP_SECONDS = 2
@@ -147,6 +149,28 @@ def should_do_full_refresh(
     return False
 
 
+def rotate_day_if_needed(
+    existing_today: Optional[dict],
+    existing_syncstate: Optional[dict],
+    start_date: str,
+) -> tuple[Optional[dict], Optional[dict], bool]:
+    if not existing_today or not existing_syncstate:
+        return existing_today, existing_syncstate, False
+
+    previous_start_date = (existing_syncstate.get("dateFilter") or {}).get("startDate")
+
+    if previous_start_date == start_date:
+        return existing_today, existing_syncstate, False
+
+    storage.write_json(
+        YESTERDAY_FILENAME,
+        existing_today,
+        pretty=False,
+    )
+
+    return None, None, True
+
+
 def run_today_sync() -> dict:
     api_key = os.environ.get("SOS_API_KEY")
     if not api_key:
@@ -160,6 +184,11 @@ def run_today_sync() -> dict:
 
     existing_today = storage.read_json(TODAY_FILENAME)
     existing_syncstate = storage.read_json(SYNCSTATE_FILENAME)
+    existing_today, existing_syncstate, day_rotated = rotate_day_if_needed(
+        existing_today,
+        existing_syncstate,
+        start_date,
+    )
 
     full_refresh = should_do_full_refresh(
         existing_today,
@@ -251,6 +280,7 @@ def run_today_sync() -> dict:
         "lastSuccessfulRunCompletedAt": generated_at,
         "mode": "full" if full_refresh else "delta",
         "period": "today",
+        "dayRotated": day_rotated,
         "dateFilter": {
             "startDate": start_date,
             "endDate": end_date,
@@ -282,6 +312,7 @@ def run_today_sync() -> dict:
         "storage": syncstate["storage"],
         "todayFile": TODAY_FILENAME,
         "syncstateFile": SYNCSTATE_FILENAME,
+        "dayRotated": day_rotated,
         "pagesFetched": pages_fetched,
         "recordsFetched": len(fetched_records),
         "recordsAdded": added_count,
@@ -298,5 +329,57 @@ def read_today_json() -> Optional[str]:
     return storage.read_text(TODAY_FILENAME)
 
 
+def read_yesterday_json() -> Optional[str]:
+    return storage.read_text(YESTERDAY_FILENAME)
+
+
 def read_syncstate_json() -> Optional[str]:
     return storage.read_text(SYNCSTATE_FILENAME)
+
+
+def get_nearby_observations(
+    lat: float,
+    lon: float,
+    radius_km: float,
+    max_results: Optional[int] = None,
+) -> Optional[dict]:
+    today = storage.read_json(TODAY_FILENAME)
+
+    if not today:
+        return None
+
+    matching_records = []
+
+    for record in today.get("records") or []:
+        distance = distance_km(
+            lat,
+            lon,
+            record.get("latitude"),
+            record.get("longitude"),
+        )
+
+        if distance is None or distance > radius_km:
+            continue
+
+        enriched_record = dict(record)
+        enriched_record["distanceKm"] = round(distance, 3)
+        matching_records.append(enriched_record)
+
+    matching_records.sort(key=lambda item: item["distanceKm"])
+
+    if max_results is not None:
+        matching_records = matching_records[:max_results]
+
+    return {
+        "schemaVersion": 1,
+        "source": "today",
+        "center": {
+            "latitude": lat,
+            "longitude": lon,
+        },
+        "radiusKm": radius_km,
+        "recordCount": len(matching_records),
+        "records": matching_records,
+        "cacheGeneratedAt": today.get("generatedAt"),
+        "cacheRecordCount": today.get("recordCount"),
+    }

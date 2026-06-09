@@ -4,7 +4,20 @@ Azure Functions backend for BirdSpotter.
 
 ## Current version
 
-v0.5.0
+v1.0.0
+
+## Status
+
+Production-ready backend cache for BirdSpotter.
+
+Features:
+
+- Azure Functions
+- Azure Blob Storage
+- Full and delta synchronization
+- Automatic day rollover
+- Geospatial filtering endpoint
+- Timer-based synchronization
 
 ## Features
 
@@ -15,10 +28,13 @@ v0.5.0
 - Timer-triggered sync every 5 minutes
 - Azure Blob Storage cache
   - `observations/today.json`
+  - `observations/yesterday.json`
   - `metadata/syncstate.json`
 - HTTP endpoints:
   - `GET /api/sync-today`
   - `GET /api/observations/today`
+  - `GET /api/observations/yesterday`
+  - `GET /api/observations/nearby` which takes parameter for lat, lon and radius
   - `GET /api/syncstate`
 
 ## Configuration
