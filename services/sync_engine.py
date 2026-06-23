@@ -1,22 +1,54 @@
 import datetime
+import json
+import logging
 import os
 from pathlib import Path
 from typing import Optional
 
+from services.config import get_sos_api_key, load_local_env
 from services.geo import distance_km
 from services.sos_client import build_search_body, call_sos_search_by_cursor
 from storage.blob_storage import BlobStorage
 from storage.file_storage import FileStorage
 
+load_local_env()
+
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
+METADATA_DIR = PROJECT_ROOT / "metadata"
+TAXON_FAMILY_SWEDISH_FILENAME = "taxon_family_sv.json"
 
 TODAY_FILENAME = "today.json"
 SYNCSTATE_FILENAME = "syncstate.json"
 YESTERDAY_FILENAME = "yesterday.json"
+NEARBY_OBSERVATION_PERIODS = ("today", "yesterday")
+NEARBY_OBSERVATION_FILENAMES = {
+    "today": TODAY_FILENAME,
+    "yesterday": YESTERDAY_FILENAME,
+}
 
 MAX_PAGES = int(os.environ["MAX_PAGES"])
 OVERLAP_SECONDS = 2
+TAXON_EXTENSION_FIELDS = (
+    "taxonSortOrder",
+    "taxonDyntaxaId",
+    "taxonOrder",
+    "taxonFamily",
+    "taxonGenus",
+    "taxonScientificName",
+    "taxonRank",
+    "taxonFamilySwedish",
+)
+
+
+def load_taxon_family_swedish_names() -> dict:
+    path = METADATA_DIR / TAXON_FAMILY_SWEDISH_FILENAME
+
+    with path.open(encoding="utf-8") as file:
+        return json.load(file)
+
+
+TAXON_FAMILY_SWEDISH_NAMES = load_taxon_family_swedish_names()
 
 
 def create_storage():
@@ -33,6 +65,43 @@ def create_storage():
 
 
 storage = create_storage()
+
+
+def as_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def with_taxon_extension_fields(record: dict) -> dict:
+    enriched_record = dict(record)
+
+    for field in TAXON_EXTENSION_FIELDS:
+        enriched_record.setdefault(field, None)
+
+    enriched_record["taxonFamilySwedish"] = taxon_family_swedish_name(
+        enriched_record.get("taxonFamily")
+    )
+
+    return enriched_record
+
+
+def taxon_family_swedish_name(taxon_family: Optional[str]) -> Optional[str]:
+    if not taxon_family:
+        return None
+
+    return TAXON_FAMILY_SWEDISH_NAMES.get(taxon_family)
+
+
+def has_taxon_extension_fields(record: dict) -> bool:
+    return all(field in record for field in TAXON_EXTENSION_FIELDS)
+
+
+def cached_records_have_taxon_extension_fields(existing_today: dict) -> bool:
+    records = existing_today.get("records") or []
+
+    return all(
+        isinstance(record, dict) and has_taxon_extension_fields(record)
+        for record in records
+    )
 
 
 def utc_now_iso() -> str:
@@ -65,23 +134,24 @@ def apply_overlap(value: str) -> str:
 
 
 def normalize_record(record: dict) -> dict:
-    occurrence = record.get("occurrence") or {}
-    taxon = record.get("taxon") or {}
-    taxon_attrs = taxon.get("attributes") or {}
-    location = record.get("location") or {}
-    event = record.get("event") or {}
+    occurrence = as_dict(record.get("occurrence"))
+    taxon = as_dict(record.get("taxon"))
+    taxon_attrs = as_dict(taxon.get("attributes"))
+    location = as_dict(record.get("location"))
+    event = as_dict(record.get("event"))
 
     occurrence_id = occurrence.get("occurrenceId")
     observed_at = event.get("startDate")
     lat = location.get("decimalLatitude")
     lon = location.get("decimalLongitude")
 
-    activity = ((occurrence.get("activity") or {}).get("value")) or (
-        (occurrence.get("behavior") or {}).get("value")
-    )
+    activity = as_dict(occurrence.get("activity")).get("value") or as_dict(
+        occurrence.get("behavior")
+    ).get("value")
 
     comment = occurrence.get("occurrenceRemarks")
     has_comment = bool(comment and str(comment).strip())
+    taxon_family = taxon.get("family")
 
     fallback_id = (
         f"{taxon.get('vernacularName')}|"
@@ -96,6 +166,14 @@ def normalize_record(record: dict) -> dict:
         "taxonId": taxon.get("id"),
         "commonName": taxon.get("vernacularName"),
         "scientificName": taxon.get("scientificName"),
+        "taxonSortOrder": taxon_attrs.get("sortOrder"),
+        "taxonDyntaxaId": taxon_attrs.get("dyntaxaTaxonId"),
+        "taxonOrder": taxon.get("order"),
+        "taxonFamily": taxon_family,
+        "taxonFamilySwedish": taxon_family_swedish_name(taxon_family),
+        "taxonGenus": taxon.get("genus"),
+        "taxonScientificName": taxon.get("scientificName"),
+        "taxonRank": taxon.get("taxonRank"),
         "observedAt": observed_at,
         "sourceModifiedAt": record.get("modified"),
         "reportedAt": occurrence.get("reportedDate"),
@@ -103,8 +181,8 @@ def normalize_record(record: dict) -> dict:
         "latitude": lat,
         "longitude": lon,
         "locality": location.get("locality"),
-        "municipality": (location.get("municipality") or {}).get("name"),
-        "county": (location.get("county") or {}).get("name"),
+        "municipality": as_dict(location.get("municipality")).get("name"),
+        "county": as_dict(location.get("county")).get("name"),
         "individualCount": occurrence.get("individualCount"),
         "activity": activity,
         "observerName": occurrence.get("recordedBy"),
@@ -130,23 +208,38 @@ def get_latest_source_modified_at(records: list[dict]) -> Optional[str]:
     return latest_value
 
 
+def get_full_refresh_reason(
+    existing_today: Optional[dict],
+    existing_syncstate: Optional[dict],
+    start_date: str,
+) -> Optional[str]:
+    if not existing_today or not existing_syncstate:
+        return "missing_cache"
+
+    previous_start_date = (existing_syncstate.get("dateFilter") or {}).get("startDate")
+
+    if previous_start_date != start_date:
+        return "new_day"
+
+    if not existing_syncstate.get("latestSourceModifiedAt"):
+        return "missing_latest_source_modified_at"
+
+    if not cached_records_have_taxon_extension_fields(existing_today):
+        return "missing_taxon_extension_fields"
+
+    return None
+
+
 def should_do_full_refresh(
     existing_today: Optional[dict],
     existing_syncstate: Optional[dict],
     start_date: str,
 ) -> bool:
-    if not existing_today or not existing_syncstate:
-        return True
-
-    previous_start_date = (existing_syncstate.get("dateFilter") or {}).get("startDate")
-
-    if previous_start_date != start_date:
-        return True
-
-    if not existing_syncstate.get("latestSourceModifiedAt"):
-        return True
-
-    return False
+    return get_full_refresh_reason(
+        existing_today,
+        existing_syncstate,
+        start_date,
+    ) is not None
 
 
 def rotate_day_if_needed(
@@ -172,9 +265,7 @@ def rotate_day_if_needed(
 
 
 def run_today_sync() -> dict:
-    api_key = os.environ.get("SOS_API_KEY")
-    if not api_key:
-        raise RuntimeError("SOS_API_KEY is missing")
+    api_key = get_sos_api_key()
 
     take = int(os.environ.get("SOS_TAKE", "2500"))
     max_pages = MAX_PAGES
@@ -190,11 +281,15 @@ def run_today_sync() -> dict:
         start_date,
     )
 
-    full_refresh = should_do_full_refresh(
+    full_refresh_reason = get_full_refresh_reason(
         existing_today,
         existing_syncstate,
         start_date,
     )
+    full_refresh = full_refresh_reason is not None
+
+    if full_refresh:
+        logging.info("Today sync running full refresh. reason=%s", full_refresh_reason)
 
     modified_from = None
     if not full_refresh:
@@ -236,7 +331,11 @@ def run_today_sync() -> dict:
 
     existing_records = []
     if not full_refresh:
-        existing_records = existing_today.get("records") or []
+        existing_records = [
+            with_taxon_extension_fields(record)
+            for record in existing_today.get("records") or []
+            if isinstance(record, dict)
+        ]
 
     records_by_id = {
         record["id"]: record for record in existing_records if record.get("id")
@@ -257,7 +356,9 @@ def run_today_sync() -> dict:
 
         records_by_id[record_id] = record
 
-    merged_records = list(records_by_id.values())
+    merged_records = [
+        with_taxon_extension_fields(record) for record in records_by_id.values()
+    ]
     latest_source_modified_at = get_latest_source_modified_at(merged_records)
     generated_at = utc_now_iso()
 
@@ -279,6 +380,7 @@ def run_today_sync() -> dict:
         "lastRunStartedAt": started_at,
         "lastSuccessfulRunCompletedAt": generated_at,
         "mode": "full" if full_refresh else "delta",
+        "fullRefreshReason": full_refresh_reason,
         "period": "today",
         "dayRotated": day_rotated,
         "dateFilter": {
@@ -341,16 +443,21 @@ def get_nearby_observations(
     lat: float,
     lon: float,
     radius_km: float,
+    period: str = "today",
     max_results: Optional[int] = None,
 ) -> Optional[dict]:
-    today = storage.read_json(TODAY_FILENAME)
+    filename = NEARBY_OBSERVATION_FILENAMES.get(period)
+    if filename is None:
+        raise ValueError(f"Unsupported observation period: {period}")
 
-    if not today:
+    cached_observations = storage.read_json(filename)
+
+    if not cached_observations:
         return None
 
     matching_records = []
 
-    for record in today.get("records") or []:
+    for record in cached_observations.get("records") or []:
         distance = distance_km(
             lat,
             lon,
@@ -372,7 +479,8 @@ def get_nearby_observations(
 
     return {
         "schemaVersion": 1,
-        "source": "today",
+        "source": period,
+        "period": period,
         "center": {
             "latitude": lat,
             "longitude": lon,
@@ -380,6 +488,6 @@ def get_nearby_observations(
         "radiusKm": radius_km,
         "recordCount": len(matching_records),
         "records": matching_records,
-        "cacheGeneratedAt": today.get("generatedAt"),
-        "cacheRecordCount": today.get("recordCount"),
+        "cacheGeneratedAt": cached_observations.get("generatedAt"),
+        "cacheRecordCount": cached_observations.get("recordCount"),
     }

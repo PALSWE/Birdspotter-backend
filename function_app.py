@@ -7,6 +7,7 @@ import azure.functions as func
 import requests
 
 from services.sync_engine import (
+    NEARBY_OBSERVATION_PERIODS,
     get_nearby_observations,
     read_syncstate_json,
     read_today_json,
@@ -72,7 +73,9 @@ def json_response(
     )
 
 
-@app.route(route="observations/yesterday", methods=["GET"])
+@app.route(
+    route="observations/yesterday", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS
+)
 def get_yesterday_observations(req: func.HttpRequest) -> func.HttpResponse:
     content = read_yesterday_json()
 
@@ -129,7 +132,9 @@ def sync_today_timer(timer: func.TimerRequest) -> None:
         raise
 
 
-@app.route(route="observations/today", methods=["GET"])
+@app.route(
+    route="observations/today", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS
+)
 def get_today_observations(req: func.HttpRequest) -> func.HttpResponse:
     content = read_today_json()
 
@@ -146,8 +151,22 @@ def get_today_observations(req: func.HttpRequest) -> func.HttpResponse:
     return json_response(req, content)
 
 
-@app.route(route="observations/nearby", methods=["GET"])
+@app.route(
+    route="observations/nearby", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS
+)
 def get_nearby(req: func.HttpRequest) -> func.HttpResponse:
+    period = req.params.get("period", "today")
+
+    if period not in NEARBY_OBSERVATION_PERIODS:
+        return json_response(
+            req,
+            {
+                "success": False,
+                "error": "Invalid period. Accepted values are: today, yesterday.",
+            },
+            status_code=400,
+        )
+
     try:
         lat = float(req.params["lat"])
         lon = float(req.params["lon"])
@@ -188,15 +207,17 @@ def get_nearby(req: func.HttpRequest) -> func.HttpResponse:
         lat=lat,
         lon=lon,
         radius_km=radius_km,
+        period=period,
         max_results=max_results,
     )
 
     if result is None:
+        filename = f"{period}.json"
         return json_response(
             req,
             {
                 "success": False,
-                "error": "today.json does not exist. Run /api/sync-today first.",
+                "error": f"{filename} does not exist. Run /api/sync-today first.",
             },
             status_code=404,
         )
@@ -204,7 +225,7 @@ def get_nearby(req: func.HttpRequest) -> func.HttpResponse:
     return json_response(req, result)
 
 
-@app.route(route="syncstate", methods=["GET"])
+@app.route(route="syncstate", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 def get_syncstate(req: func.HttpRequest) -> func.HttpResponse:
     content = read_syncstate_json()
 
@@ -218,4 +239,39 @@ def get_syncstate(req: func.HttpRequest) -> func.HttpResponse:
             status_code=404,
         )
 
-    return json_response(req, content)
+    try:
+        syncstate = json.loads(content)
+    except json.JSONDecodeError:
+        return json_response(
+            req,
+            {
+                "success": False,
+                "error": "syncstate.json contains invalid JSON.",
+            },
+            status_code=500,
+        )
+
+    latest_source_modified_at = syncstate.get("latestSourceModifiedAt")
+
+    if not latest_source_modified_at:
+        return json_response(
+            req,
+            {
+                "success": False,
+                "error": "syncstate.json does not contain latestSourceModifiedAt.",
+            },
+            status_code=500,
+        )
+
+    logging.info(
+        "Returning latestSourceModifiedAt=%s",
+        latest_source_modified_at,
+    )
+
+    return json_response(
+        req,
+        {
+            "success": True,
+            "latestSourceModifiedAt": latest_source_modified_at,
+        }
+    )
