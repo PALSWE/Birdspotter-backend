@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 from typing import Optional
 
+import requests
+from azure.core.exceptions import AzureError
+
 from services.config import get_sos_api_key, load_local_env
 from services.geo import distance_km
 from services.sos_client import build_search_body, call_sos_search_by_cursor
@@ -29,6 +32,21 @@ NEARBY_OBSERVATION_FILENAMES = {
 
 MAX_PAGES = int(os.environ["MAX_PAGES"])
 OVERLAP_SECONDS = 2
+
+SYNC_OUTCOME_SUCCESS = "success"
+SYNC_OUTCOME_FAILURE = "failure"
+
+ERROR_SLU_TIMEOUT = "SLU_TIMEOUT"
+ERROR_SLU_AUTH_FAILED = "SLU_AUTH_FAILED"
+ERROR_SLU_HTTP_ERROR = "SLU_HTTP_ERROR"
+ERROR_SLU_INVALID_RESPONSE = "SLU_INVALID_RESPONSE"
+ERROR_SLU_NETWORK_ERROR = "SLU_NETWORK_ERROR"
+ERROR_CONFIG_ERROR = "CONFIG_ERROR"
+ERROR_STORAGE_ERROR = "STORAGE_ERROR"
+ERROR_UNKNOWN_ERROR = "UNKNOWN_ERROR"
+
+SLU_AUTH_FAILED_STATUS_CODES = frozenset({401, 403})
+
 TAXON_EXTENSION_FIELDS = (
     "taxonSortOrder",
     "taxonDyntaxaId",
@@ -235,11 +253,14 @@ def should_do_full_refresh(
     existing_syncstate: Optional[dict],
     start_date: str,
 ) -> bool:
-    return get_full_refresh_reason(
-        existing_today,
-        existing_syncstate,
-        start_date,
-    ) is not None
+    return (
+        get_full_refresh_reason(
+            existing_today,
+            existing_syncstate,
+            start_date,
+        )
+        is not None
+    )
 
 
 def rotate_day_if_needed(
@@ -265,13 +286,24 @@ def rotate_day_if_needed(
 
 
 def run_today_sync() -> dict:
+    started_at = utc_now_iso()
+
+    try:
+        return _execute_today_sync(started_at)
+    except Exception as exc:
+        error_code = classify_sync_error(exc)
+        logging.exception("Today sync attempt failed. errorCode=%s", error_code)
+        record_failed_sync_attempt(started_at, error_code)
+        raise
+
+
+def _execute_today_sync(started_at: str) -> dict:
     api_key = get_sos_api_key()
 
     take = int(os.environ.get("SOS_TAKE", "2500"))
     max_pages = MAX_PAGES
 
     start_date, end_date = today_range_local()
-    started_at = utc_now_iso()
 
     existing_today = storage.read_json(TODAY_FILENAME)
     existing_syncstate = storage.read_json(SYNCSTATE_FILENAME)
@@ -379,6 +411,11 @@ def run_today_sync() -> dict:
         "schemaVersion": 1,
         "lastRunStartedAt": started_at,
         "lastSuccessfulRunCompletedAt": generated_at,
+        "lastAttempt": {
+            "attemptedAt": started_at,
+            "outcome": SYNC_OUTCOME_SUCCESS,
+            "errorCode": None,
+        },
         "mode": "full" if full_refresh else "delta",
         "fullRefreshReason": full_refresh_reason,
         "period": "today",
@@ -425,6 +462,70 @@ def run_today_sync() -> dict:
         "completedFullCursorScan": not cursor,
         "remainingCursor": cursor,
     }
+
+
+def classify_sync_error(exc: BaseException) -> str:
+    if isinstance(exc, requests.exceptions.Timeout):
+        return ERROR_SLU_TIMEOUT
+
+    if isinstance(exc, requests.exceptions.HTTPError):
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+
+        if status_code in SLU_AUTH_FAILED_STATUS_CODES:
+            return ERROR_SLU_AUTH_FAILED
+
+        return ERROR_SLU_HTTP_ERROR
+
+    if isinstance(exc, requests.exceptions.RequestException):
+        return ERROR_SLU_NETWORK_ERROR
+
+    if isinstance(exc, json.JSONDecodeError):
+        return ERROR_SLU_INVALID_RESPONSE
+
+    if isinstance(exc, AzureError):
+        return ERROR_STORAGE_ERROR
+
+    if isinstance(exc, (RuntimeError, KeyError, ValueError)):
+        return ERROR_CONFIG_ERROR
+
+    return ERROR_UNKNOWN_ERROR
+
+
+def record_failed_sync_attempt(attempted_at: str, error_code: str) -> bool:
+    """Persist a failed sync attempt without touching previously successful state.
+
+    Only the ``lastAttempt`` block is replaced. Successful fields such as
+    ``lastSuccessfulRunCompletedAt`` and ``latestSourceModifiedAt``, and the
+    cache files, are left untouched. Returns ``False`` when the state could not
+    be updated and never raises.
+    """
+
+    try:
+        existing_syncstate = storage.read_json(SYNCSTATE_FILENAME)
+    except Exception:
+        logging.exception(
+            "Could not read %s while recording a failed sync attempt.",
+            SYNCSTATE_FILENAME,
+        )
+        return False
+
+    syncstate = dict(existing_syncstate) if isinstance(existing_syncstate, dict) else {}
+    syncstate["lastAttempt"] = {
+        "attemptedAt": attempted_at,
+        "outcome": SYNC_OUTCOME_FAILURE,
+        "errorCode": error_code,
+    }
+
+    try:
+        storage.write_json(SYNCSTATE_FILENAME, syncstate, pretty=True)
+    except Exception:
+        logging.exception(
+            "Could not write failed sync attempt to %s.",
+            SYNCSTATE_FILENAME,
+        )
+        return False
+
+    return True
 
 
 def read_today_json() -> Optional[str]:

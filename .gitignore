@@ -96,3 +96,4 @@ __azurite_db*__.json
 .ruff_cache/
 tempCodeRunnerFile.py
 .pypirc
+TODO.md

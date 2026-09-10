@@ -6,6 +6,7 @@ from typing import Any
 import azure.functions as func
 import requests
 
+from services.health import build_health_response
 from services.sync_engine import (
     NEARBY_OBSERVATION_PERIODS,
     get_nearby_observations,
@@ -273,5 +274,12 @@ def get_syncstate(req: func.HttpRequest) -> func.HttpResponse:
         {
             "success": True,
             "latestSourceModifiedAt": latest_source_modified_at,
-        }
+        },
     )
+
+
+@app.route(route="health", methods=["GET"])
+def get_health(req: func.HttpRequest) -> func.HttpResponse:
+    payload, status_code = build_health_response()
+
+    return json_response(req, payload, status_code=status_code)

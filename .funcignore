@@ -1,0 +1,41 @@
+# Exclude local/tooling artifacts from Function App deployments.
+# Keep application code and metadata/ included.
+
+# Local development, tooling and caches
+.vscode/
+.venv/
+env/
+ENV/
+.python_packages/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Version control internals
+.git/
+.gitignore
+.funcignore
+
+# Local settings and secrets (never deploy)
+.env
+.env.example
+local.settings.json
+local_settings.py
+
+# Local tests and reference material
+tests/
+reference-docs/
+TODO.md
+README.md
+
+# Local data cache and Azurite artifacts
+data/
+__blobstorage__/
+__queuestorage__/
+__azurite_db_*.json
+AzuriteConfig
